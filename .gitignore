@@ -1,0 +1,18 @@
+venv/
+__pycache__/
+*.pyc
+*_backup.py
+*.log
+*.csv
+*.npy
+*.png
+*.jpg
+*.dmp
+clips/
+runs/
+crypt_finds/
+maps/*.json
+bot/*.json
+# never commit game files
+*.exe
+*.tiger

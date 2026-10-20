@@ -1,0 +1,10 @@
+Pymem==1.14.0
+psutil==7.2.2
+vgamepad==0.1.0
+dxcam==0.3.0
+mss==10.2.0
+numpy==2.5.4
+pillow==13.0.0
+opencv-python==5.0.0.93
+winocr==0.0.15
+customtkinter==6.0.0
