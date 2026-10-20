@@ -17,7 +17,7 @@ on disk.
 ## Requirements
 | What | Why |
 |---|---|
-| Rise of the Tomb Raider (Steam) with **Endurance** | the game (you must own it) |
+| Rise of the Tomb Raider (Steam)| the game (you must own it) |
 | Windows 10 / 11, 64-bit | Windows OCR, XInput |
 | [Python 3.11+](https://www.python.org/downloads/) (64-bit, tick "Add to PATH") | runs the bot |
 | [ViGEmBus driver](https://github.com/nefarius/ViGEmBus/releases) | the virtual controller the AI uses |
