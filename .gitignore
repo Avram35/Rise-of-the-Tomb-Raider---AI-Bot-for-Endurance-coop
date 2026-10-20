@@ -18,3 +18,5 @@ bot/*.json
 *.tiger
 coop_config.json
 p2_modules.txt
+status.json
+pad_slots.json

@@ -97,15 +97,6 @@ PATCHES_ALL = [
      "no pause on focus loss"),
 ]
 PATCH_P2 = [("TR2MUTEX".encode("utf-16le"), "TR2MUTE2".encode("utf-16le"), 1, "own single-instance lock"),
-            # controller: P2 reads XInput controller 2 (the bot's virtual pad) instead of 1 - no XInputPlus DLL
-            # (both crashes, Nucleus and the first own-launcher test, were access violations in a low-address DLL
-            # right after the controller scan). Pad object setup FUN_140cb91e0: mov edi,edx -> lea edi,[rdx+1]
-            # (the skipped JZ only matters without XInput), and the connect check in FUN_140ca15c0: xor ecx,ecx ->
-            # mov ecx,ebp (ebp = 1 there).
-            (bytes.fromhex("8bfa488bd97431488d5424208bcf"), bytes.fromhex("488bd98d7a0190488d5424208bcf"), 1,
-             "reads controller 2"),
-            (bytes.fromhex("4084ed7413488d54242033c9ff9388000000"),
-             bytes.fromhex("4084ed7413488d5424208bcdff9388000000"), 1, "connect check on controller 2"),
             # leaderboard crash (pause menu "Friends' Scores" + end-of-run screen): Goldberg returns entries with a
             # garbage detail count, FUN_140563350 then reads past its 64-int array -> access violation at
             # ROTTR.exe+0x563553 (all Nucleus-era crashes + the first own-launcher pause crash). P2 skips the
@@ -141,9 +132,34 @@ def link_tree(dst):
     return n
 
 
+def pad_patches(slot):
+    """make this copy read XInput controller `slot` (0-3) instead of always the first one - no XInputPlus DLL.
+    Pad object setup FUN_140cb91e0: mov edi,edx -> lea edi,[rdx+slot] (the skipped JZ only matters without XInput).
+    Connect check FUN_140ca15c0: xor ecx,ecx -> mov ecx,ebp (ebp = 1 there) for slot >= 1."""
+    out = [(bytes.fromhex("8bfa488bd97431488d5424208bcf"),
+            bytes.fromhex("488bd98d7a%02x90488d5424208bcf" % slot), 1, f"reads controller {slot + 1}")]
+    if slot >= 1:
+        out.append((bytes.fromhex("4084ed7413488d54242033c9ff9388000000"),
+                    bytes.fromhex("4084ed7413488d5424208bcdff9388000000"), 1, "connect check on that controller"))
+    return out
+
+
+def pad_slots():
+    """(your slot, the AI's slot) from pad_slots.json, written by run_bot.py when it creates the virtual pad"""
+    try:
+        p = json.load(open(os.path.join(HERE, "pad_slots.json")))
+        bot, human = p["bot"], p.get("human")
+        if human is None:
+            human = 0 if bot != 0 else 1
+        return human, bot
+    except (OSError, ValueError, KeyError):
+        return 0, 1
+
+
 def patched_exe(dst, player):
     data = open(os.path.join(GAME, "ROTTR.exe"), "rb").read()
-    for old, new, count, what in PATCHES_ALL + (PATCH_P2 if player == 2 else []):
+    slot = pad_slots()[player - 1]
+    for old, new, count, what in PATCHES_ALL + (PATCH_P2 if player == 2 else []) + pad_patches(slot):
         found = data.count(old)
         if found != count:
             raise SystemExit(f"ROTTR.exe: '{what}' pattern found {found}x (expected {count}) - different game build?")
@@ -222,8 +238,9 @@ def reg_write(vals):
 
 
 def start(cfg=None):
-    if cfg or not os.path.exists(os.path.join(INST, "P2", "ROTTR.exe")):
-        build(cfg)
+    h, b = pad_slots()
+    print(f"controllers: you = slot {h + 1}, AI = slot {b + 1}")
+    build(cfg)                                   # quick when the copies exist: re-patches the exes for these slots
     saved = reg_read()
     print("starting Player 1 (you) ...")
     subprocess.Popen([os.path.join(INST, "P1", "ROTTR.exe")], cwd=os.path.join(INST, "P1"))

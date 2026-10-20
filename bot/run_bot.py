@@ -341,6 +341,47 @@ def log_p2_modules(pid):
         print(f"module map failed: {ex}")
 
 
+def detect_pad_slot(pad):
+    """which XInput slot (0-3) did Windows give the virtual pad? Put a marker on its right stick (x = 12345),
+    find the slot that reports it, write it to pad_slots.json with the human's slot (the other connected one).
+    coop_launcher patches each game copy to read its own slot (live 2026-10-20: the virtual pad got slot 0,
+    so Player 1's game listened to the bot)."""
+    import json
+    try:
+        xi = ctypes.windll.xinput1_4
+    except OSError:
+        xi = ctypes.windll.xinput9_1_0
+    bot = None
+    for _ in range(40):                                   # the new pad needs a moment to appear
+        pad.right_joystick(x_value=12345, y_value=0)
+        pad.update()
+        time.sleep(0.05)
+        for s in range(4):
+            st = _XST()
+            if xi.XInputGetState(s, ctypes.byref(st)) == 0 and st.Gamepad.sThumbRX == 12345:
+                bot = s
+        if bot is not None:
+            break
+    pad.right_joystick(x_value=0, y_value=0)
+    pad.update()
+    if bot is None:
+        print("could not find the virtual pad's controller slot (assuming 2nd)")
+        return
+    human = None
+    for s in range(4):
+        st = _XST()
+        if s != bot and xi.XInputGetState(s, ctypes.byref(st)) == 0:
+            human = s
+            break
+    json.dump({"bot": bot, "human": human, "t": time.time()}, open("pad_slots.json", "w"))
+    print(f"controllers: AI = slot {bot + 1}, you = " + (f"slot {human + 1}" if human is not None else
+                                                          "NOT FOUND (plug your controller in)"))
+    WORLD_PAD_SLOTS.update({"bot": bot, "human": human})
+
+
+WORLD_PAD_SLOTS = {}
+
+
 def p1_watch_thread(world):
     """co-op: watch PLAYER 1 (the human) and learn from them. Reads the real controller (XInput slot 0; the
     virtual pad is slot 1) every 50 ms:
@@ -358,7 +399,8 @@ def p1_watch_thread(world):
     while True:
         time.sleep(0.05)
         st = _XST()
-        if xi.XInputGetState(0, ctypes.byref(st)) != 0:
+        slot = WORLD_PAD_SLOTS.get("human")
+        if xi.XInputGetState(0 if slot is None else slot, ctypes.byref(st)) != 0:
             continue
         g = st.Gamepad
         p1 = getattr(world, "_p1_last", None)
@@ -1051,6 +1093,8 @@ class PadOut:
 def main():
     out = PadOut(live=not DEMO)          # create the virtual pad FIRST so Nucleus can see it
     PAD_EARLY.append(out.pad)
+    if out.pad is not None and not SOLO:
+        detect_pad_slot(out.pad)
     world = DemoWorld() if DEMO else GameWorld(solo=SOLO)
     global CAP
     if SCREEN and not DEMO:
@@ -1099,6 +1143,8 @@ def main():
     root.title(("Lara Croft (AI)" if SOLO else "ROTTR AI partner") + (" (DEMO)" if DEMO else ""))
     root.attributes("-topmost", True)
     root.geometry("560x170+20+20")
+    if "--no-window" in sys.argv:          # co-op app shows the status in its own window (status.json)
+        root.withdraw()
     lbl = tk.Label(root, font=("Consolas", 11), justify="left", anchor="w")
     lbl.pack(fill="both", expand=True, padx=8, pady=6)
     last = {"t": time.time()}
@@ -1277,7 +1323,7 @@ def main():
             extra = f"\nCam yaw: {math.degrees(world.cam.yaw):.0f} deg ({src})"
             if SOLO:
                 extra += f"\nHome: {'set (F7)' if world.home else 'press F7 to set'}"
-        lbl.config(text=(f"{'Lara Croft' if SOLO else 'Bot'}: {'ON ' if enabled['on'] else 'OFF'}   mode {brain.mode.upper()}   "
+        status_text = (f"{'Lara Croft' if SOLO else 'Bot'}: {'ON ' if enabled['on'] else 'OFF'}   mode {brain.mode.upper()}   "
                          f"(F1 follow F2 hunt F3 collect F4 auto F5 guard, F8 on/off)\n"
                          f"State: {cmd.state if cmd else '-'}  {cmd.info if cmd else ''}\n"
                          + (f"Lara Croft: HP {world.lara_hp() or '?'}" if SOLO else f"Distance to P1: {d:.1f} m")
@@ -1285,7 +1331,18 @@ def main():
                             if getattr(world, "enemy", None) else "") + "\n"
                          + ("" if SOLO else f"P1 downed: {'YES' if w.p1_downed else 'no'}")
                          + (f"   HP {world.p1_health['health']}/{world.p1_health['max']}"
-                            if getattr(world, "p1_health", None) else "") + extra))
+                            if getattr(world, "p1_health", None) else "") + extra)
+        lbl.config(text=status_text)
+        if now - last.get("status_t", 0) > 0.3:
+            last["status_t"] = now
+            try:
+                import json
+                json.dump({"t": now, "on": enabled["on"], "mode": brain.mode, "state": cmd.state if cmd else "-",
+                           "info": cmd.info if cmd else "", "dist_m": round(d, 1),
+                           "p1_downed": bool(w.p1_downed), "text": status_text}, open("status.json.tmp", "w"))
+                os.replace("status.json.tmp", "status.json")
+            except Exception:
+                pass
         root.after(int(TICK * 1000), tick)
 
     def close():

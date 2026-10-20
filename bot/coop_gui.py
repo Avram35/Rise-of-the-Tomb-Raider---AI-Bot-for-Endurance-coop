@@ -77,6 +77,10 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(self, text=KEYS, justify="left", anchor="w", font=ctk.CTkFont(family="Consolas", size=12),
                      text_color="gray75").pack(fill="x", padx=20, pady=(10, 4))
+        self.live = ctk.CTkLabel(self, text="AI partner: not running", justify="left", anchor="w",
+                                 font=ctk.CTkFont(family="Consolas", size=13), fg_color="gray17", corner_radius=6,
+                                 height=96)
+        self.live.pack(fill="x", padx=16, pady=(4, 2))
         self.log = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
         self.log.pack(fill="both", expand=True, padx=16, pady=(4, 14))
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -119,7 +123,27 @@ class App(ctk.CTk):
             self.say(f"AI partner stopped (exit code {self.bot.returncode})")
             self.bot = None
         self.b_bot.configure(text="2.  AI partner running" if self.bot else "2.  Start AI partner")
+        self.show_live()
         self.after(150, self.pump)
+
+    def show_live(self):
+        """the AI's status (written by run_bot.py to status.json), shown here instead of its floating window"""
+        if self.bot is None:
+            self.live.configure(text="  AI partner: not running", text_color="gray60")
+            return
+        try:
+            import json
+            import time
+            st = json.load(open(os.path.join(HERE, "status.json")))
+            if time.time() - st["t"] > 3:
+                raise ValueError
+            on = "ON" if st["on"] else "OFF (F8)"
+            txt = (f"  AI: {on}    mode {st['mode'].upper()}    state {st['state']}\n"
+                   f"  {st['info'][:90]}\n"
+                   f"  distance to you {st['dist_m']:.1f} m" + ("    YOU ARE DOWN - coming" if st["p1_downed"] else ""))
+            self.live.configure(text=txt, text_color="#9be7a0" if st["on"] else "gray80")
+        except (OSError, ValueError, KeyError):
+            self.live.configure(text="  AI partner: waiting for both games...", text_color="gray70")
 
     def run_bg(self, title, fn):
         def job():
@@ -157,7 +181,7 @@ class App(ctk.CTk):
     def start_bot(self):
         if self.bot is not None:
             return
-        args = [PY, "-u", "run_bot.py"] + (["--no-combat"] if self.no_combat.get() else [])
+        args = [PY, "-u", "run_bot.py", "--no-window"] + (["--no-combat"] if self.no_combat.get() else [])
         self.bot = subprocess.Popen(args, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, text=True, bufsize=1, encoding="utf-8",
                                     errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
