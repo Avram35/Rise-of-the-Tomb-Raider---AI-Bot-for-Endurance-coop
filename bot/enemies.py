@@ -18,7 +18,7 @@ import sys
 import time
 
 from health import INSTANCE_RVA
-from probe_players import Reader
+from probe_players import Reader, norm_exe
 
 ARRAY_RVA = 0x24EEAD0
 STRIDE = 0x120
@@ -151,7 +151,7 @@ def main():
     games = []
     for p in psutil.process_iter(["name", "exe"]):
         if (p.info["name"] or "").lower() == "rottr.exe":
-            exe = (p.info["exe"] or "").lower()
+            exe = norm_exe(p.info["exe"])
             games.append(("P1" if "instance0" in exe else "P2" if "instance1" in exe else "solo", Enemies(Reader(p.pid))))
     if not games:
         raise SystemExit("ROTTR.exe not running")

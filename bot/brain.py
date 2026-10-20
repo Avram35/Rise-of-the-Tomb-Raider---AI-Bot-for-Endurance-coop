@@ -10,6 +10,7 @@ Units: game units (~cm). Angles: radians, yaw measured in the world X/Y plane.
 import math
 from collections import deque
 from dataclasses import dataclass, field, replace
+import time
 
 
 @dataclass
@@ -18,6 +19,7 @@ class World:
     p2: tuple                 # Player 2 (bot) position
     cam_yaw: float            # Player 2 camera yaw (direction the camera looks, radians)
     p1_downed: bool = False
+    p1_jumps: tuple = ()      # co-op: spots where P1 jumped while moving (x, y, z, t) -> jump at the same place
     enemy: tuple = None       # nearest live hostile NPC position (x, y, z) or None
     enemy_human: bool = False # aim higher at humans (chest) than at animals (body)
     enemy_hp: int = None      # target's current HP (to notice shots that don't land)
@@ -171,6 +173,9 @@ class Brain:
     _move_heading: float = None   # world direction the last stick command pushed toward
     _move_mag: float = 0.0
     _replans_failed: int = 0
+    _jump_spots: list = field(default_factory=list)
+    _jumps_seen: set = field(default_factory=set)
+    _last_copy_jump: float = 0.0
     max_replans: int = 5          # stuck -> block the cell ahead + re-plan this many times before escape moves
     avoid_r: float = 300.0        # early sidestep: NPC within 3 m ...
     avoid_cone: float = math.radians(45)   # ... and within +-45 deg of where we walk (game: FUN_14053efd0)
@@ -206,7 +211,10 @@ class Brain:
         Skip to the crumb nearest the bot, then aim at the first crumb not yet reached."""
         if not self.trail:
             return p1
-        best = min(range(len(self.trail)), key=lambda i: dist2d(self.trail[i], p2))
+        # nearest crumb, height difference beyond 3 m counts double: in a crypt the deep crumbs lie right under the entrance
+        # in 2D -> skipping to them made the bot walk out of the cave (live 2026-10-20)
+        best = min(range(len(self.trail)), key=lambda i: math.hypot(dist2d(self.trail[i], p2),
+                                                                    2 * max(0.0, abs(self.trail[i][2] - p2[2]) - 300)))
         for _ in range(best):
             self.trail.popleft()
         while self.trail and dist2d(self.trail[0], p2) < self.crumb_reached and                 abs(self.trail[0][2] - p2[2]) < 150:     # a crumb on another level is not reached
@@ -290,12 +298,34 @@ class Brain:
     def step(self, w: World) -> Command:
         cmd = self._step(w)
         cmd = self._sidestep(w, cmd)
+        cmd = self._copy_jumps(w, cmd)
         if cmd.lx or cmd.ly:                        # remember where this command pushes Lara (world angle)
             self._move_heading = w.cam_yaw + math.atan2(-cmd.lx, cmd.ly)
             self._move_mag = min(1.0, math.hypot(cmd.lx, cmd.ly)) if not cmd.sprint else 0.0   # sprint: no
                                                     # contact sensing (would inflate the learned walking speed)
         else:
             self._move_heading, self._move_mag = None, 0.0
+        return cmd
+
+    def _copy_jumps(self, w, cmd):
+        """imitation: P1 jumped here (gap, spike pit, ledge) -> when the bot reaches the same spot on P1's path,
+        moving the same way, it jumps too. Each spot is used once and forgotten after 3 min."""
+        for j in w.p1_jumps:
+            if j[3] not in self._jumps_seen:
+                self._jumps_seen.add(j[3])
+                self._jump_spots.append(j)
+        now = w.t
+        self._jump_spots = [j for j in self._jump_spots if abs(j[2] - w.p2[2]) < 400 and
+                            (time.time() - j[3] < 180 if j[3] > 1e9 else True)]
+        if not (cmd.lx or cmd.ly) or self.state not in ("FOLLOW", "CATCHUP"):
+            return cmd
+        for j in list(self._jump_spots):
+            if dist2d(j, w.p2) < 90:
+                cmd.jump = True
+                cmd.info += " | jump (P1 jumped here)"
+                self._jump_spots.remove(j)
+                self._last_copy_jump = now
+                break
         return cmd
 
     def _sidestep(self, w, cmd):

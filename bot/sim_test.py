@@ -445,3 +445,15 @@ b = Brain(hunt=True, coop=True); b.set_mode("auto")
 c = b.step(World((500.0, 0, 0), (0.0, 0.0, 0.0), 0.0, collect=(600.0, 100.0, 0.0), t=0))
 assert c.state in ("COLLECT", "PICKUP"), c
 print("co-op leash OK")
+
+# imitation: P1 jumped at (500, 0) while walking +X -> the bot (following the trail) jumps at the same spot
+b = Brain()
+jumped_at = None
+for i in range(300):
+    t = i * 0.05
+    p2 = (min(t * 300.0, 2000.0) - 300.0, 0.0, 0.0)
+    c = b.step(World((2500.0, 0, 0), p2, 0.0, p1_jumps=((500.0, 0.0, 0.0, 12345.0),), t=t))
+    if c.jump and jumped_at is None:
+        jumped_at = p2[0]
+assert jumped_at is not None and abs(jumped_at - 500) < 100, jumped_at
+print("copy P1 jumps OK")

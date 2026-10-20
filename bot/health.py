@@ -18,7 +18,7 @@ import time
 
 import psutil
 
-from probe_players import Reader
+from probe_players import Reader, norm_exe
 
 INSTANCE_RVA = 0x24EF3D0
 HC_INDEX_RVA = 0x1101D10
@@ -61,7 +61,7 @@ def instances():
     out = []
     for p in psutil.process_iter(["name", "exe"]):
         if (p.info["name"] or "").lower() == "rottr.exe":
-            exe = (p.info["exe"] or "").lower()
+            exe = norm_exe(p.info["exe"])
             tag = "P1" if "instance0" in exe else "P2" if "instance1" in exe else "solo"
             out.append((tag, Health(Reader(p.pid))))
     if not out:

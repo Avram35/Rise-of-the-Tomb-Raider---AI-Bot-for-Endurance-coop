@@ -22,6 +22,7 @@ from brain import Brain, Command, World
 DEMO = "--demo" in sys.argv
 EXPLORE = "--explore" in sys.argv
 BOT_PID = None                         # co-op: process id of Player 2's game (set when the instances are found)
+CAMPFIRE_TYPE = 2196                  # base camp fire (recorded run): X next to it opens the camp menu
 TRAP_TYPES = {1556, 1557, 1300}       # ceiling spike trap parts (recorded run 2026-10-20); plates/pits: TODO
 SOLO = "--solo" in sys.argv
 COMBAT = "--no-combat" not in sys.argv   # --no-combat: follow/revive only
@@ -294,6 +295,88 @@ def hud_text_thread(world):
             print(f"hud_text_thread: {ex}")
 
 
+class _XGP(ctypes.Structure):
+    _fields_ = [("wButtons", ctypes.c_ushort), ("bLeftTrigger", ctypes.c_ubyte), ("bRightTrigger", ctypes.c_ubyte),
+                ("sThumbLX", ctypes.c_short), ("sThumbLY", ctypes.c_short),
+                ("sThumbRX", ctypes.c_short), ("sThumbRY", ctypes.c_short)]
+
+
+class _XST(ctypes.Structure):
+    _fields_ = [("dwPacketNumber", ctypes.c_uint), ("Gamepad", _XGP)]
+
+
+MENU_WORDS = ({"BASE", "CAMP"}, {"SKILLS", "INVENTORY"}, {"SKILLS", "WEAPONS"}, {"CRAFTED", "REQUIREMENTS"})
+
+
+def coop_menu_thread(world):
+    """co-op: every 2.5 s OCR the BOT's window; if it is stuck in the base camp / skills / craft menu (live: the bot
+    opened the camp menu and stayed there while P1 died in the crypt) -> press B a few times to back out"""
+    import gamekeys
+    while True:
+        time.sleep(2.5)
+        if not getattr(world, "bot_on", False):
+            continue
+        try:
+            ws = {w.strip(".,!:'") for w, _, _ in gamekeys.screen_words()}
+        except Exception:
+            continue
+        if any(m <= ws for m in MENU_WORDS):
+            print("bot is in the base camp menu - backing out (B)")
+            world.menu_escape_until = time.time() + 2.0
+
+
+def log_p2_modules(pid):
+    """write Player 2's loaded modules (base..end) to p2_modules.txt: the game log's crash address can then be
+    matched to the DLL that crashed (2026-10-20: access violation at 0xa38e3553, outside ROTTR.exe)"""
+    try:
+        import pymem.process
+        pm = __import__("pymem").Pymem()
+        pm.open_process_from_id(pid)
+        with open("p2_modules.txt", "w") as f:
+            f.write(f"{time.ctime()} pid {pid}\n")
+            for m in pymem.process.enum_process_module(pm.process_handle):
+                f.write(f"{m.lpBaseOfDll:#018x} {m.lpBaseOfDll + m.SizeOfImage:#018x} {m.name}\n")
+        print("Player 2 module map saved (p2_modules.txt)")
+    except Exception as ex:
+        print(f"module map failed: {ex}")
+
+
+def p1_watch_thread(world):
+    """co-op: watch PLAYER 1 (the human) and learn from them. Reads the real controller (XInput slot 0; the
+    virtual pad is slot 1) every 50 ms:
+      - A pressed while moving -> a jump spot on P1's path (the bot jumps at the same place: gaps, spike pits)
+      - everything -> p1_log.csv (position, HP, buttons, triggers, sticks) for later tuning"""
+    try:
+        xi = ctypes.windll.xinput1_4
+    except OSError:
+        xi = ctypes.windll.xinput9_1_0
+    log = open("p1_log.csv", "a", buffering=1)
+    log.write("t,x,y,z,hp,buttons,lt,rt,lx,ly,rx,ry\n")
+    a_prev, last_log = False, 0.0
+    names = {0x1000: "A", 0x2000: "B", 0x4000: "X", 0x8000: "Y", 0x0100: "LB", 0x0200: "RB", 0x0040: "L3",
+             0x0080: "R3", 0x0010: "START", 0x0020: "BACK"}
+    while True:
+        time.sleep(0.05)
+        st = _XST()
+        if xi.XInputGetState(0, ctypes.byref(st)) != 0:
+            continue
+        g = st.Gamepad
+        p1 = getattr(world, "_p1_last", None)
+        a = bool(g.wButtons & 0x1000)
+        moving = abs(g.sThumbLX) > 10000 or abs(g.sThumbLY) > 10000
+        if a and not a_prev and moving and p1 is not None:
+            world.p1_jump_spots.append((p1[0], p1[1], p1[2], time.time()))
+            print(f"P1 jumped at {p1[0]:.0f}/{p1[1]:.0f}/{p1[2]:.0f} - the bot will jump there too")
+        a_prev = a
+        if time.time() - last_log > 0.2 and p1 is not None:
+            last_log = time.time()
+            hp = (getattr(world, "p1_health", None) or {}).get("health", "")
+            btn = "+".join(n for b, n in names.items() if g.wButtons & b)
+            log.write(f"{time.time():.2f},{p1[0]:.0f},{p1[1]:.0f},{p1[2]:.0f},{hp},{btn},{g.bLeftTrigger},"
+                      f"{g.bRightTrigger},{g.sThumbLX / 32767:.2f},{g.sThumbLY / 32767:.2f},"
+                      f"{g.sThumbRX / 32767:.2f},{g.sThumbRY / 32767:.2f}\n")
+
+
 def arrows_thread(world):
     """while the bot aims, read the arrow counter about once a second (OCR ~50 ms, off the main loop)"""
     while True:
@@ -494,7 +577,7 @@ class GameWorld:
     Solo test (--solo, one game): the bot walks the single Lara back to the 'home' spot saved with F7."""
     def __init__(self, solo=False):
         import psutil
-        from probe_players import Reader
+        from probe_players import Reader, norm_exe
         procs = [p for p in psutil.process_iter(["name", "exe"]) if (p.info["name"] or "").lower() == "rottr.exe"]
         self.solo = solo
         if solo:
@@ -506,18 +589,19 @@ class GameWorld:
             while True:     # pad already exists; wait until Nucleus has started both games
                 procs = [p for p in psutil.process_iter(["name", "exe"])
                          if (p.info["name"] or "").lower() == "rottr.exe"]
-                exes = " ".join((p.info["exe"] or "").lower() for p in procs)
+                exes = " ".join(norm_exe(p.info["exe"]) for p in procs)   # + own launcher
                 if "instance0" in exes and "instance1" in exes:
                     break
-                print(f"waiting for Nucleus Instance0 + Instance1 ({len(procs)} ROTTR.exe running)... F6 = tap A")
+                print(f"waiting for both games (Nucleus or coop_launcher) ({len(procs)} ROTTR.exe running)... F6 = tap A")
                 if ctypes.windll.user32.GetAsyncKeyState(VK_F6) & 0x8000 and PAD_EARLY:
                     PAD_EARLY[0].press_button(button=BUTTONS["jump"]); PAD_EARLY[0].update(); time.sleep(0.15)
                     PAD_EARLY[0].release_button(button=BUTTONS["jump"]); PAD_EARLY[0].update()
                 time.sleep(0.5)
             print("both instances found; waiting 5 s for them to load")
             time.sleep(5)
-            by = {("instance0" if "instance0" in (p.info["exe"] or "").lower() else
-                   "instance1" if "instance1" in (p.info["exe"] or "").lower() else "other"): p for p in procs}
+            nm = lambda p: norm_exe(p.info["exe"])
+            by = {("instance0" if "instance0" in nm(p) else "instance1" if "instance1" in nm(p) else "other"): p
+                  for p in procs}
             self.r1, self.r2 = Reader(by["instance0"].pid), Reader(by["instance1"].pid)
             self.p2_pid = by["instance1"].pid
             global BOT_PID
@@ -561,8 +645,9 @@ class GameWorld:
             def job():
                 try:
                     import census
-                    self._trap_list = tuple(tuple(o["pos"]) for o in census.instances(self.r2, 2000)
-                                            if o["type"] in TRAP_TYPES)
+                    objs = census.instances(self.r2, 2000)
+                    self._trap_list = tuple(tuple(o["pos"]) for o in objs if o["type"] in TRAP_TYPES)
+                    self._fires = tuple(tuple(o["pos"]) for o in objs if o["type"] == CAMPFIRE_TYPE)
                     if self._trap_list and not getattr(self, "_trap_said", False):
                         print(f"TRAPS nearby ({len(self._trap_list)} parts) - careful mode: P1's footsteps only")
                     self._trap_said = bool(self._trap_list)
@@ -584,6 +669,7 @@ class GameWorld:
             self.cam.known = True
         self.cam_from_memory = cam is not None
         p1 = (self.home or p2) if self.solo else self._pos(self.r1)
+        self._p1_last = p1
         # downed = health <= 0 (verified live: health sits at -99, stage 5, while downed)
         self.p1_health = None if self.solo else self.h1.read()
         downed = bool(self.p1_health and self.p1_health["max"] > 0 and self.p1_health["health"] <= 0)
@@ -638,7 +724,7 @@ class GameWorld:
         cpos = read_cam_pos(self.r2)
         if cpos and math.dist(cpos, p2) > 800:
             cpos = None                                  # sanity: camera must be near Lara
-        return World(p1, p2, self.cam.yaw, p1_downed=downed, cam_pitch=pitch, cam_pos=cpos, enemy=self.enemy["pos"] if self.enemy else None, loot=self.loot,
+        return World(p1, p2, self.cam.yaw, p1_downed=downed, p1_jumps=tuple(self.p1_jump_spots), cam_pitch=pitch, cam_pos=cpos, enemy=self.enemy["pos"] if self.enemy else None, loot=self.loot,
                      enemy_human=bool(self.enemy and self.enemy["type"] in HUMAN_TYPES),
                      enemy_hp=self.enemy["health"] if self.enemy else None,
                      enemy_vel=self._vel if self.enemy else None,
@@ -660,6 +746,7 @@ class GameWorld:
     loot = None
     _target = None
     _hp_prev = None
+    p1_jump_spots = []           # co-op: where the human pressed A while moving (filled by p1_watch_thread)
     _danger_until = 0.0
     _banned = {}                 # slot -> time until which we ignore it (unreachable)
     _best = None                 # (closest distance so far, time it was reached) for the current target
@@ -768,7 +855,9 @@ class GameWorld:
                     self.col = None
         hungry = bool(getattr(self, "_icons", None) and self._icons[0] != "green")
         if self.col is None and (hungry or now >= getattr(self, "_col_pause_until", 0)):
+            fires = getattr(self, "_fires", ())
             free = [e for e in lst if self._col_banned.get(e["handle"], 0) < now
+                    and not any(math.dist(e["pos"], f) < 300 for f in fires)
                     and full.get(e.get("kind"), 0) < now]
             if free:
                 self.col, self._col_best, self._col_near_since = free[0], None, None
@@ -986,6 +1075,13 @@ def main():
         threading.Thread(target=arrows_thread, args=(world,), daemon=True).start()
         if SOLO:
             threading.Thread(target=hud_text_thread, args=(world,), daemon=True).start()
+    if not SOLO and not DEMO:
+        import threading
+        threading.Thread(target=p1_watch_thread, args=(world,), daemon=True).start()
+        if SCREEN:
+            threading.Thread(target=coop_menu_thread, args=(world,), daemon=True).start()
+        if getattr(world, "p2_pid", None):
+            threading.Thread(target=log_p2_modules, args=(world.p2_pid,), daemon=True).start()
     if "--wander" in sys.argv:
         wx, wy = map(float, sys.argv[sys.argv.index("--wander") + 1].split(","))
         brain.wander = (wx, wy, 0.0)
@@ -1139,6 +1235,8 @@ def main():
                 cmd = Command(lx=0.0, ly=1.0, state="CALIBRATE", info="learning camera")
             else:
                 cmd = brain.step(w)
+                if time.time() < getattr(world, "menu_escape_until", 0):
+                    cmd = Command(drop=(now % 0.5) < 0.12, state="MENU", info="backing out of the camp menu (B)")
             out.send(cmd)
             world.apply(cmd, dt)
             world.brain_state = cmd.state

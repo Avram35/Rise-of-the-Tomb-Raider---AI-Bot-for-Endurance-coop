@@ -16,3 +16,5 @@ bot/*.json
 # never commit game files
 *.exe
 *.tiger
+coop_config.json
+p2_modules.txt

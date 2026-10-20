@@ -7,4 +7,4 @@ if not exist "venv\Scripts\python.exe" (
     venv\Scripts\python -m pip install --upgrade pip
     venv\Scripts\python -m pip install -r ..\requirements.txt
 )
-start "" "venv\Scripts\pythonw.exe" launcher.py
+start "" "venv\Scripts\pythonw.exe" coop_gui.py

@@ -103,3 +103,13 @@ if __name__ == "__main__":
             line += f" | #{q['i']} user={q['user']:#x} inst={q['instance']:#x} pos={pos}"
         print(line)
         time.sleep(0.5)
+
+
+def norm_exe(path):
+    """exe path, lower case, with our own launcher's folders mapped to Nucleus' names:
+    instances/P1/ROTTR.exe -> instance0, instances/P2/ROTTR.exe -> instance1"""
+    s = (path or "").lower().replace("\\", "/")
+    for n, tag in (("p1", "instance0"), ("p2", "instance1")):     # coop_launcher folders .../P1|P2/ROTTR.exe
+        if s.endswith(f"/{n}/rottr.exe"):
+            return s[:-len(f"/{n}/rottr.exe")] + f"/{tag}/rottr.exe"
+    return s
